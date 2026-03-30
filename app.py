@@ -1,59 +1,30 @@
 from flask import Flask, request, jsonify
-import base64
+from flask_cors import CORS
 import UnityPy
 import traceback
 import os
 
 app = Flask(__name__)
-
-# Yardımcı Fonksiyon: MonoBehaviour (Tree) İçindeki Tüm Metinleri Bulur
-def extract_strings_from_tree(tree, current_path=""):
-    strings = []
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            strings.extend(extract_strings_from_tree(v, f"{current_path}/{k}"))
-    elif isinstance(tree, list):
-        for i, v in enumerate(tree):
-            strings.extend(extract_strings_from_tree(v, f"{current_path}[{i}]"))
-    elif isinstance(tree, str):
-        # Eğer metin boş değilse ve çok kısa/anlamsız değilse al
-        if len(tree.strip()) > 0:
-            strings.append({'path': current_path, 'text': tree})
-    return strings
-
-# Yardımcı Fonksiyon: Çevrilmiş metinleri Tree (Ağaç) yapısına geri enjekte eder
-def patch_tree_strings(tree, translations):
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            tree[k] = patch_tree_strings(v, translations)
-    elif isinstance(tree, list):
-        for i, v in enumerate(tree):
-            tree[i] = patch_tree_strings(v, translations)
-    elif isinstance(tree, str):
-        # Birebir eşleşme varsa çeviriyi koy
-        if tree in translations:
-            return translations[tree]
-    return tree
+# CORS: Tarayıcının (JavaScript) doğrudan bu API'ye dosya göndermesine izin verir.
+CORS(app) 
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "UnityPy API is running!"})
+    return jsonify({"status": "UnityPy API is running! CORS Enabled."})
 
 @app.route('/extract_unity', methods=['POST'])
 def extract_unity():
     try:
-        req_data = request.get_json()
-        if not req_data or 'filedata' not in req_data:
-            return jsonify({"error": "filedata eksik."}), 400
-
-        filedata_b64 = req_data.get('filedata')
-        file_bytes = base64.b64decode(filedata_b64)
+        if 'file' not in request.files:
+            return jsonify({"success": False, "error": "Dosya gönderilmedi."}), 400
+            
+        file = request.files['file']
+        file_bytes = file.read()
         
-        # UnityPy ile dosyayı hafızada aç
         env = UnityPy.load(file_bytes)
         extracted_texts = []
         
-        # Dosya içindeki tüm objeleri tara
+        # SADECE TEXTASSET (DİYALOGLAR) TARANIYOR - Ağır assetler es geçiliyor!
         for obj in env.objects:
             if obj.type.name == "TextAsset":
                 data = obj.read()
@@ -64,21 +35,6 @@ def extract_unity():
                         "name": data.name,
                         "text": data.text
                     })
-            elif obj.type.name == "MonoBehaviour":
-                if obj.serialized_type.nodes: # Tip ağacı (typetree) okunabiliyorsa
-                    data = obj.read()
-                    try:
-                        tree = data.read_typetree()
-                        found_strings = extract_strings_from_tree(tree)
-                        for item in found_strings:
-                            extracted_texts.append({
-                                "type": "MonoBehaviour",
-                                "path_id": obj.path_id,
-                                "name": data.name,
-                                "text": item['text']
-                            })
-                    except Exception as e:
-                        pass # Okunamayan özel scriptleri atla
 
         return jsonify({"success": True, "data": extracted_texts})
 
@@ -88,34 +44,29 @@ def extract_unity():
 @app.route('/patch_unity', methods=['POST'])
 def patch_unity():
     try:
-        req_data = request.get_json()
-        filedata_b64 = req_data.get('filedata')
-        translations = req_data.get('translations') # Format: {"Orijinal": "Çeviri"}
+        if 'file' not in request.files or 'translations' not in request.form:
+            return jsonify({"success": False, "error": "Eksik veri gönderildi."}), 400
+            
+        file = request.files['file']
+        import json
+        translations = json.loads(request.form['translations'])
         
-        file_bytes = base64.b64decode(filedata_b64)
+        file_bytes = file.read()
         env = UnityPy.load(file_bytes)
         
-        # Objeleri tekrar tara ve çevirileri yerleştir
+        # Çevirileri sadece TextAsset'lerin içine enjekte ediyoruz
         for obj in env.objects:
             if obj.type.name == "TextAsset":
                 data = obj.read()
                 if data.text in translations:
                     data.text = translations[data.text]
                     data.save()
-            elif obj.type.name == "MonoBehaviour":
-                if obj.serialized_type.nodes:
-                    data = obj.read()
-                    try:
-                        tree = data.read_typetree()
-                        patched_tree = patch_tree_strings(tree, translations)
-                        data.save_typetree(patched_tree)
-                    except:
-                        pass
         
-        # Modifiye edilmiş dosyayı paketle
         packed_bytes = env.file.save()
-        patched_b64 = base64.b64encode(packed_bytes).decode('utf-8')
         
+        # JS tarafına geri göndermek için Base64 yapıyoruz
+        import base64
+        patched_b64 = base64.b64encode(packed_bytes).decode('utf-8')
         return jsonify({"success": True, "patched_file": patched_b64})
 
     except Exception as e:
