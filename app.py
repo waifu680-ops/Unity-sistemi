@@ -3,14 +3,17 @@ from flask_cors import CORS
 import UnityPy
 import traceback
 import os
+import tempfile
+import base64
+import json
 
 app = Flask(__name__)
-# CORS: Tarayıcının (JavaScript) doğrudan bu API'ye dosya göndermesine izin verir.
-CORS(app) 
+# CORS: Tarayıcının doğrudan dosya fırlatmasını sağlar
+CORS(app)
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "UnityPy API is running! CORS Enabled."})
+    return jsonify({"status": "UnityPy API is running! V62 (Disk-Optimized) CORS Enabled."})
 
 @app.route('/extract_unity', methods=['POST'])
 def extract_unity():
@@ -19,12 +22,15 @@ def extract_unity():
             return jsonify({"success": False, "error": "Dosya gönderilmedi."}), 400
             
         file = request.files['file']
-        file_bytes = file.read()
         
-        env = UnityPy.load(file_bytes)
+        # V62: RAM patlamasını önlemek için dosyayı geçici olarak diske kaydet
+        temp_path = os.path.join(tempfile.gettempdir(), "upload.unity3d")
+        file.save(temp_path)
+        
+        # UnityPy dosyayı diskten okurken (RAM yerine) çok daha az hafıza tüketir
+        env = UnityPy.load(temp_path)
         extracted_texts = []
         
-        # SADECE TEXTASSET (DİYALOGLAR) TARANIYOR - Ağır assetler es geçiliyor!
         for obj in env.objects:
             if obj.type.name == "TextAsset":
                 data = obj.read()
@@ -35,6 +41,10 @@ def extract_unity():
                         "name": data.name,
                         "text": data.text
                     })
+                    
+        # İşlem bitince sunucuyu şişirmemek için geçici dosyayı sil
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
         return jsonify({"success": True, "data": extracted_texts})
 
@@ -48,13 +58,14 @@ def patch_unity():
             return jsonify({"success": False, "error": "Eksik veri gönderildi."}), 400
             
         file = request.files['file']
-        import json
         translations = json.loads(request.form['translations'])
         
-        file_bytes = file.read()
-        env = UnityPy.load(file_bytes)
+        # V62: Geri paketleme işlemi için de diski kullan
+        temp_path = os.path.join(tempfile.gettempdir(), "patch.unity3d")
+        file.save(temp_path)
         
-        # Çevirileri sadece TextAsset'lerin içine enjekte ediyoruz
+        env = UnityPy.load(temp_path)
+        
         for obj in env.objects:
             if obj.type.name == "TextAsset":
                 data = obj.read()
@@ -64,8 +75,9 @@ def patch_unity():
         
         packed_bytes = env.file.save()
         
-        # JS tarafına geri göndermek için Base64 yapıyoruz
-        import base64
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            
         patched_b64 = base64.b64encode(packed_bytes).decode('utf-8')
         return jsonify({"success": True, "patched_file": patched_b64})
 
